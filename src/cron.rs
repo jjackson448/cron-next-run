@@ -155,3 +155,143 @@ impl CronSchedule {
         results
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn civil(day: u32, month: u32, weekday: u32, hour: u32, minute: u32) -> Civil {
+        Civil { year: 2026, month, day, hour, minute, second: 0, weekday }
+    }
+
+    #[test]
+    fn field_star_matches_everything_in_range() {
+        let f = parse_field("*", 0, 59, "minute").unwrap();
+        assert!(f.is_all);
+        assert!(f.contains(0));
+        assert!(f.contains(59));
+    }
+
+    #[test]
+    fn field_single_value() {
+        let f = parse_field("5", 0, 59, "minute").unwrap();
+        assert!(!f.is_all);
+        assert!(f.contains(5));
+        assert!(!f.contains(4));
+        assert!(!f.contains(6));
+    }
+
+    #[test]
+    fn field_range() {
+        let f = parse_field("1-5", 0, 59, "minute").unwrap();
+        for v in 1..=5 {
+            assert!(f.contains(v));
+        }
+        assert!(!f.contains(0));
+        assert!(!f.contains(6));
+    }
+
+    #[test]
+    fn field_step_from_start_of_range() {
+        let f = parse_field("*/15", 0, 59, "minute").unwrap();
+        assert!(f.contains(0));
+        assert!(f.contains(15));
+        assert!(f.contains(30));
+        assert!(f.contains(45));
+        assert!(!f.contains(1));
+        assert!(!f.contains(50));
+    }
+
+    #[test]
+    fn field_range_with_step() {
+        let f = parse_field("1-10/2", 0, 59, "minute").unwrap();
+        for v in [1, 3, 5, 7, 9] {
+            assert!(f.contains(v));
+        }
+        for v in [0, 2, 4, 6, 8, 10] {
+            assert!(!f.contains(v));
+        }
+    }
+
+    #[test]
+    fn field_comma_list_of_mixed_parts() {
+        let f = parse_field("1,3,10-12", 0, 59, "minute").unwrap();
+        assert!(f.contains(1));
+        assert!(f.contains(3));
+        assert!(f.contains(10));
+        assert!(f.contains(11));
+        assert!(f.contains(12));
+        assert!(!f.contains(2));
+        assert!(!f.contains(9));
+    }
+
+    #[test]
+    fn field_rejects_value_above_max() {
+        assert!(parse_field("60", 0, 59, "minute").is_err());
+    }
+
+    #[test]
+    fn field_rejects_value_below_min() {
+        assert!(parse_field("0", 1, 31, "day-of-month").is_err());
+    }
+
+    #[test]
+    fn field_rejects_backwards_range() {
+        assert!(parse_field("10-5", 0, 59, "minute").is_err());
+    }
+
+    #[test]
+    fn field_rejects_zero_step() {
+        assert!(parse_field("*/0", 0, 59, "minute").is_err());
+    }
+
+    #[test]
+    fn field_rejects_non_numeric_value() {
+        assert!(parse_field("abc", 0, 59, "minute").is_err());
+    }
+
+    #[test]
+    fn dow_seven_is_aliased_to_sunday() {
+        let schedule = CronSchedule::parse("* * * * 7").unwrap();
+        assert!(schedule.dow.contains(0));
+    }
+
+    #[test]
+    fn dom_and_dow_both_restricted_is_or() {
+        // 15th of the month, or any Monday.
+        let schedule = CronSchedule::parse("0 0 15 * 1").unwrap();
+        assert!(schedule.matches(&civil(15, 6, 3, 0, 0))); // 15th, a Wednesday
+        assert!(schedule.matches(&civil(2, 6, 1, 0, 0))); // 2nd, a Monday
+        assert!(!schedule.matches(&civil(3, 6, 2, 0, 0))); // neither
+    }
+
+    #[test]
+    fn dom_unrestricted_leaves_dow_as_the_only_constraint() {
+        let schedule = CronSchedule::parse("0 0 * * 1").unwrap();
+        assert!(schedule.matches(&civil(1, 6, 1, 0, 0)));
+        assert!(!schedule.matches(&civil(1, 6, 2, 0, 0)));
+    }
+
+    #[test]
+    fn dow_unrestricted_leaves_dom_as_the_only_constraint() {
+        let schedule = CronSchedule::parse("0 0 15 * *").unwrap();
+        assert!(schedule.matches(&civil(15, 6, 3, 0, 0)));
+        assert!(!schedule.matches(&civil(16, 6, 4, 0, 0)));
+    }
+
+    #[test]
+    fn next_n_every_minute_returns_consecutive_minutes() {
+        let schedule = CronSchedule::parse("* * * * *").unwrap();
+        let from = crate::datetime::to_unix(2026, 6, 1, 12, 0, 0);
+        let results = schedule.next_n(from, 3);
+        assert_eq!(results, vec![from + 60, from + 120, from + 180]);
+    }
+
+    #[test]
+    fn next_n_skips_to_matching_hour() {
+        let schedule = CronSchedule::parse("0 9 * * *").unwrap();
+        let from = crate::datetime::to_unix(2026, 6, 1, 8, 30, 0);
+        let results = schedule.next_n(from, 1);
+        assert_eq!(results, vec![crate::datetime::to_unix(2026, 6, 1, 9, 0, 0)]);
+    }
+}
