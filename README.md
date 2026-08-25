@@ -59,6 +59,10 @@ Standard five-field cron: `minute hour day-of-month month day-of-week`.
 Each field accepts `*`, a single number, a range (`1-5`), a step (`*/15`,
 `1-10/2`), or a comma-separated list of any of those.
 
+Month and day-of-week also accept three-letter names instead of numbers,
+case-insensitive: `JAN`-`DEC` and `SUN`-`SAT`. Names work anywhere a number
+would, including ranges and lists: `MON-FRI`, `JAN,JUL`.
+
 Day-of-month and day-of-week follow the usual cron quirk: if both fields
 are restricted (neither is `*`), a match happens when *either* one matches,
 not both.
@@ -68,8 +72,6 @@ Everything runs in UTC. There's no timezone handling yet.
 ## What this doesn't do (yet)
 
 - No seconds field, no `@yearly` / `@reboot` shorthand
-- No month or weekday names, numbers only (`1-12`, `0-6`, where both `0`
-  and `7` mean Sunday)
 - No timezone support
 - Finds matches by scanning minute by minute, capped at five years out, so
   an expression that can never match (February 30th) fails fast instead of

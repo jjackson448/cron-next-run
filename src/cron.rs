@@ -28,16 +28,54 @@ impl Field {
     }
 }
 
-fn parse_field(spec: &str, min: u32, max: u32, label: &str) -> Result<Field, CronError> {
+// Three-letter names cron accepts in the month and day-of-week fields,
+// case-insensitive, in place of numbers.
+const MONTH_NAMES: [(&str, u32); 12] = [
+    ("jan", 1),
+    ("feb", 2),
+    ("mar", 3),
+    ("apr", 4),
+    ("may", 5),
+    ("jun", 6),
+    ("jul", 7),
+    ("aug", 8),
+    ("sep", 9),
+    ("oct", 10),
+    ("nov", 11),
+    ("dec", 12),
+];
+
+const DOW_NAMES: [(&str, u32); 7] =
+    [("sun", 0), ("mon", 1), ("tue", 2), ("wed", 3), ("thu", 4), ("fri", 5), ("sat", 6)];
+
+fn parse_value(s: &str, names: Option<&[(&str, u32)]>, label: &str) -> Result<u32, CronError> {
+    if let Some(table) = names {
+        let lower = s.to_ascii_lowercase();
+        if let Some(&(_, v)) = table.iter().find(|(name, _)| *name == lower) {
+            return Ok(v);
+        }
+    }
+    s.parse()
+        .map_err(|_| CronError::new(format!("invalid value '{}' in {} field", s, label)))
+}
+
+fn parse_field(spec: &str, min: u32, max: u32, label: &str, names: Option<&[(&str, u32)]>) -> Result<Field, CronError> {
     let mut allowed = vec![false; (max + 1) as usize];
     let is_all = spec == "*";
     for part in spec.split(',') {
-        parse_part(part, min, max, label, &mut allowed)?;
+        parse_part(part, min, max, label, names, &mut allowed)?;
     }
     Ok(Field { allowed, is_all })
 }
 
-fn parse_part(part: &str, min: u32, max: u32, label: &str, allowed: &mut Vec<bool>) -> Result<(), CronError> {
+fn parse_part(
+    part: &str,
+    min: u32,
+    max: u32,
+    label: &str,
+    names: Option<&[(&str, u32)]>,
+    allowed: &mut Vec<bool>,
+) -> Result<(), CronError> {
     let (range_part, step) = match part.split_once('/') {
         Some((r, s)) => {
             let step: u32 = s
@@ -51,17 +89,11 @@ fn parse_part(part: &str, min: u32, max: u32, label: &str, allowed: &mut Vec<boo
     let (lo, hi) = if range_part == "*" {
         (min, max)
     } else if let Some((a, b)) = range_part.split_once('-') {
-        let lo: u32 = a
-            .parse()
-            .map_err(|_| CronError::new(format!("invalid value '{}' in {} field", a, label)))?;
-        let hi: u32 = b
-            .parse()
-            .map_err(|_| CronError::new(format!("invalid value '{}' in {} field", b, label)))?;
+        let lo = parse_value(a, names, label)?;
+        let hi = parse_value(b, names, label)?;
         (lo, hi)
     } else {
-        let v: u32 = range_part
-            .parse()
-            .map_err(|_| CronError::new(format!("invalid value '{}' in {} field", range_part, label)))?;
+        let v = parse_value(range_part, names, label)?;
         (v, v)
     };
 
@@ -104,11 +136,11 @@ impl CronSchedule {
             )));
         }
 
-        let minute = parse_field(fields[0], 0, 59, "minute")?;
-        let hour = parse_field(fields[1], 0, 23, "hour")?;
-        let dom = parse_field(fields[2], 1, 31, "day-of-month")?;
-        let month = parse_field(fields[3], 1, 12, "month")?;
-        let mut dow = parse_field(fields[4], 0, 7, "day-of-week")?;
+        let minute = parse_field(fields[0], 0, 59, "minute", None)?;
+        let hour = parse_field(fields[1], 0, 23, "hour", None)?;
+        let dom = parse_field(fields[2], 1, 31, "day-of-month", None)?;
+        let month = parse_field(fields[3], 1, 12, "month", Some(&MONTH_NAMES))?;
+        let mut dow = parse_field(fields[4], 0, 7, "day-of-week", Some(&DOW_NAMES))?;
         // cron treats both 0 and 7 as Sunday
         if dow.allowed.get(7).copied().unwrap_or(false) {
             dow.allowed[0] = true;
@@ -166,7 +198,7 @@ mod tests {
 
     #[test]
     fn field_star_matches_everything_in_range() {
-        let f = parse_field("*", 0, 59, "minute").unwrap();
+        let f = parse_field("*", 0, 59, "minute", None).unwrap();
         assert!(f.is_all);
         assert!(f.contains(0));
         assert!(f.contains(59));
@@ -174,7 +206,7 @@ mod tests {
 
     #[test]
     fn field_single_value() {
-        let f = parse_field("5", 0, 59, "minute").unwrap();
+        let f = parse_field("5", 0, 59, "minute", None).unwrap();
         assert!(!f.is_all);
         assert!(f.contains(5));
         assert!(!f.contains(4));
@@ -183,7 +215,7 @@ mod tests {
 
     #[test]
     fn field_range() {
-        let f = parse_field("1-5", 0, 59, "minute").unwrap();
+        let f = parse_field("1-5", 0, 59, "minute", None).unwrap();
         for v in 1..=5 {
             assert!(f.contains(v));
         }
@@ -193,7 +225,7 @@ mod tests {
 
     #[test]
     fn field_step_from_start_of_range() {
-        let f = parse_field("*/15", 0, 59, "minute").unwrap();
+        let f = parse_field("*/15", 0, 59, "minute", None).unwrap();
         assert!(f.contains(0));
         assert!(f.contains(15));
         assert!(f.contains(30));
@@ -204,7 +236,7 @@ mod tests {
 
     #[test]
     fn field_range_with_step() {
-        let f = parse_field("1-10/2", 0, 59, "minute").unwrap();
+        let f = parse_field("1-10/2", 0, 59, "minute", None).unwrap();
         for v in [1, 3, 5, 7, 9] {
             assert!(f.contains(v));
         }
@@ -215,7 +247,7 @@ mod tests {
 
     #[test]
     fn field_comma_list_of_mixed_parts() {
-        let f = parse_field("1,3,10-12", 0, 59, "minute").unwrap();
+        let f = parse_field("1,3,10-12", 0, 59, "minute", None).unwrap();
         assert!(f.contains(1));
         assert!(f.contains(3));
         assert!(f.contains(10));
@@ -227,27 +259,69 @@ mod tests {
 
     #[test]
     fn field_rejects_value_above_max() {
-        assert!(parse_field("60", 0, 59, "minute").is_err());
+        assert!(parse_field("60", 0, 59, "minute", None).is_err());
     }
 
     #[test]
     fn field_rejects_value_below_min() {
-        assert!(parse_field("0", 1, 31, "day-of-month").is_err());
+        assert!(parse_field("0", 1, 31, "day-of-month", None).is_err());
     }
 
     #[test]
     fn field_rejects_backwards_range() {
-        assert!(parse_field("10-5", 0, 59, "minute").is_err());
+        assert!(parse_field("10-5", 0, 59, "minute", None).is_err());
     }
 
     #[test]
     fn field_rejects_zero_step() {
-        assert!(parse_field("*/0", 0, 59, "minute").is_err());
+        assert!(parse_field("*/0", 0, 59, "minute", None).is_err());
     }
 
     #[test]
     fn field_rejects_non_numeric_value() {
-        assert!(parse_field("abc", 0, 59, "minute").is_err());
+        assert!(parse_field("abc", 0, 59, "minute", None).is_err());
+    }
+
+    #[test]
+    fn month_field_accepts_names() {
+        let f = parse_field("JAN,mar,Dec", 1, 12, "month", Some(&MONTH_NAMES)).unwrap();
+        assert!(f.contains(1));
+        assert!(f.contains(3));
+        assert!(f.contains(12));
+        assert!(!f.contains(2));
+    }
+
+    #[test]
+    fn month_field_accepts_name_range() {
+        let f = parse_field("jun-aug", 1, 12, "month", Some(&MONTH_NAMES)).unwrap();
+        for v in 6..=8 {
+            assert!(f.contains(v));
+        }
+        assert!(!f.contains(5));
+        assert!(!f.contains(9));
+    }
+
+    #[test]
+    fn dow_field_accepts_names() {
+        let f = parse_field("MON-FRI", 0, 7, "day-of-week", Some(&DOW_NAMES)).unwrap();
+        for v in 1..=5 {
+            assert!(f.contains(v));
+        }
+        assert!(!f.contains(0));
+        assert!(!f.contains(6));
+    }
+
+    #[test]
+    fn unknown_name_is_rejected() {
+        assert!(parse_field("frobnicate", 1, 12, "month", Some(&MONTH_NAMES)).is_err());
+    }
+
+    #[test]
+    fn schedule_parse_accepts_mixed_names_and_numbers() {
+        let schedule = CronSchedule::parse("0 9 * JAN,JUL MON").unwrap();
+        assert!(schedule.matches(&civil(5, 1, 1, 9, 0))); // Jan, Monday
+        assert!(schedule.matches(&civil(5, 7, 1, 9, 0))); // Jul, Monday
+        assert!(!schedule.matches(&civil(5, 3, 1, 9, 0))); // wrong month
     }
 
     #[test]
