@@ -119,6 +119,7 @@ fn parse_part(
 }
 
 pub struct CronSchedule {
+    second: Field,
     minute: Field,
     hour: Field,
     dom: Field,
@@ -127,29 +128,40 @@ pub struct CronSchedule {
 }
 
 impl CronSchedule {
+    /// Accepts the standard 5-field form (minute hour day month weekday),
+    /// which implicitly fires on second 0, or a 6-field form with a leading
+    /// seconds field prepended (second minute hour day month weekday).
     pub fn parse(expr: &str) -> Result<CronSchedule, CronError> {
         let fields: Vec<&str> = expr.split_whitespace().collect();
-        if fields.len() != 5 {
-            return Err(CronError::new(format!(
-                "expected 5 fields (minute hour day month weekday), got {}",
-                fields.len()
-            )));
-        }
+        let (second_spec, rest): (&str, &[&str]) = match fields.len() {
+            5 => ("0", &fields[..]),
+            6 => (fields[0], &fields[1..]),
+            n => {
+                return Err(CronError::new(format!(
+                    "expected 5 fields (minute hour day month weekday) or 6 with a leading seconds field, got {}",
+                    n
+                )));
+            }
+        };
 
-        let minute = parse_field(fields[0], 0, 59, "minute", None)?;
-        let hour = parse_field(fields[1], 0, 23, "hour", None)?;
-        let dom = parse_field(fields[2], 1, 31, "day-of-month", None)?;
-        let month = parse_field(fields[3], 1, 12, "month", Some(&MONTH_NAMES))?;
-        let mut dow = parse_field(fields[4], 0, 7, "day-of-week", Some(&DOW_NAMES))?;
+        let second = parse_field(second_spec, 0, 59, "second", None)?;
+        let minute = parse_field(rest[0], 0, 59, "minute", None)?;
+        let hour = parse_field(rest[1], 0, 23, "hour", None)?;
+        let dom = parse_field(rest[2], 1, 31, "day-of-month", None)?;
+        let month = parse_field(rest[3], 1, 12, "month", Some(&MONTH_NAMES))?;
+        let mut dow = parse_field(rest[4], 0, 7, "day-of-week", Some(&DOW_NAMES))?;
         // cron treats both 0 and 7 as Sunday
         if dow.allowed.get(7).copied().unwrap_or(false) {
             dow.allowed[0] = true;
         }
 
-        Ok(CronSchedule { minute, hour, dom, month, dow })
+        Ok(CronSchedule { second, minute, hour, dom, month, dow })
     }
 
-    fn matches(&self, c: &Civil) -> bool {
+    // Everything except the seconds field. Used by next_n, which checks
+    // seconds separately since a single matching minute can contain more
+    // than one matching second.
+    fn minute_matches(&self, c: &Civil) -> bool {
         if !self.minute.contains(c.minute) {
             return false;
         }
@@ -170,19 +182,36 @@ impl CronSchedule {
         }
     }
 
+    fn matches(&self, c: &Civil) -> bool {
+        self.second.contains(c.second) && self.minute_matches(c)
+    }
+
     /// Returns up to `count` unix timestamps, strictly after `from_unix`, that
     /// match this schedule. Scans minute by minute, capped five years out so
-    /// an unsatisfiable expression fails fast instead of looping forever.
+    /// an unsatisfiable expression fails fast instead of looping forever;
+    /// within each matching minute, every matching second is emitted in
+    /// order before moving on.
     pub fn next_n(&self, from_unix: i64, count: usize) -> Vec<i64> {
         let mut results = Vec::with_capacity(count);
-        let mut t = from_unix - from_unix.rem_euclid(60) + 60;
-        let limit = t + 60 * 60 * 24 * 366 * 5;
-        while results.len() < count && t < limit {
-            let civil = crate::datetime::from_unix(t);
-            if self.matches(&civil) {
-                results.push(t);
+        let mut minute_start = from_unix - from_unix.rem_euclid(60);
+        let limit = minute_start + 60 * 60 * 24 * 366 * 5;
+        while results.len() < count && minute_start < limit {
+            let civil = crate::datetime::from_unix(minute_start);
+            if self.minute_matches(&civil) {
+                for second in 0..60u32 {
+                    if results.len() >= count {
+                        break;
+                    }
+                    if !self.second.contains(second) {
+                        continue;
+                    }
+                    let t = minute_start + second as i64;
+                    if t > from_unix {
+                        results.push(t);
+                    }
+                }
             }
-            t += 60;
+            minute_start += 60;
         }
         results
     }
@@ -367,5 +396,50 @@ mod tests {
         let from = crate::datetime::to_unix(2026, 6, 1, 8, 30, 0);
         let results = schedule.next_n(from, 1);
         assert_eq!(results, vec![crate::datetime::to_unix(2026, 6, 1, 9, 0, 0)]);
+    }
+
+    #[test]
+    fn five_field_expression_implicitly_fires_on_second_zero() {
+        let schedule = CronSchedule::parse("* * * * *").unwrap();
+        assert!(schedule.second.contains(0));
+        assert!(!schedule.second.contains(30));
+    }
+
+    #[test]
+    fn six_field_expression_parses_leading_seconds() {
+        let schedule = CronSchedule::parse("30 0 9 * * *").unwrap();
+        assert!(schedule.second.contains(30));
+        assert!(!schedule.second.contains(0));
+        assert!(schedule.minute.contains(0));
+        assert!(schedule.hour.contains(9));
+    }
+
+    #[test]
+    fn schedule_rejects_wrong_field_count() {
+        assert!(CronSchedule::parse("* * * *").is_err());
+        assert!(CronSchedule::parse("* * * * * * *").is_err());
+    }
+
+    #[test]
+    fn next_n_with_seconds_field_returns_every_matching_second() {
+        let schedule = CronSchedule::parse("*/20 * * * * *").unwrap();
+        let from = crate::datetime::to_unix(2026, 6, 1, 12, 0, 0);
+        let results = schedule.next_n(from, 3);
+        assert_eq!(
+            results,
+            vec![
+                crate::datetime::to_unix(2026, 6, 1, 12, 0, 20),
+                crate::datetime::to_unix(2026, 6, 1, 12, 0, 40),
+                crate::datetime::to_unix(2026, 6, 1, 12, 1, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn next_n_seconds_field_narrows_matches_within_a_matching_minute() {
+        let schedule = CronSchedule::parse("15 0 9 * * *").unwrap();
+        let from = crate::datetime::to_unix(2026, 6, 1, 9, 0, 0);
+        let results = schedule.next_n(from, 1);
+        assert_eq!(results, vec![crate::datetime::to_unix(2026, 6, 1, 9, 0, 15)]);
     }
 }

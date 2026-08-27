@@ -57,7 +57,12 @@ cron-next-run "0 9 * * 1" --from 2026-08-22T00:00:00
 
 Standard five-field cron: `minute hour day-of-month month day-of-week`.
 Each field accepts `*`, a single number, a range (`1-5`), a step (`*/15`,
-`1-10/2`), or a comma-separated list of any of those.
+`1-10/2`), or a comma-separated list of any of those. A five-field
+expression implicitly fires on second 0.
+
+For sub-minute schedules, prepend a seconds field to get six fields:
+`second minute hour day-of-month month day-of-week`, e.g. `*/30 * * * * *`
+fires every 30 seconds.
 
 Month and day-of-week also accept three-letter names instead of numbers,
 case-insensitive: `JAN`-`DEC` and `SUN`-`SAT`. Names work anywhere a number
@@ -71,7 +76,7 @@ Everything runs in UTC. There's no timezone handling yet.
 
 ## What this doesn't do (yet)
 
-- No seconds field, no `@yearly` / `@reboot` shorthand
+- No `@yearly` / `@monthly` / `@daily` shorthand
 - No timezone support
 - Finds matches by scanning minute by minute, capped at five years out, so
   an expression that can never match (February 30th) fails fast instead of
