@@ -127,11 +127,31 @@ pub struct CronSchedule {
     dow: Field,
 }
 
+// Nickname fields per the cron(8) convention, expanded to their standard
+// 5-field equivalent before normal parsing.
+const NICKNAMES: [(&str, &str); 5] = [
+    ("@yearly", "0 0 1 1 *"),
+    ("@monthly", "0 0 1 * *"),
+    ("@weekly", "0 0 * * 0"),
+    ("@daily", "0 0 * * *"),
+    ("@hourly", "0 * * * *"),
+];
+
 impl CronSchedule {
     /// Accepts the standard 5-field form (minute hour day month weekday),
-    /// which implicitly fires on second 0, or a 6-field form with a leading
-    /// seconds field prepended (second minute hour day month weekday).
+    /// which implicitly fires on second 0, a 6-field form with a leading
+    /// seconds field prepended (second minute hour day month weekday), or
+    /// one of the `@yearly`/`@monthly`/`@weekly`/`@daily`/`@hourly` nicknames.
     pub fn parse(expr: &str) -> Result<CronSchedule, CronError> {
+        let expr = expr.trim();
+        if let Some(prefix) = expr.split_whitespace().next() {
+            if prefix.starts_with('@') {
+                return match NICKNAMES.iter().find(|(name, _)| *name == prefix) {
+                    Some((_, expanded)) => CronSchedule::parse(expanded),
+                    None => Err(CronError::new(format!("unknown nickname '{}'", prefix))),
+                };
+            }
+        }
         let fields: Vec<&str> = expr.split_whitespace().collect();
         let (second_spec, rest): (&str, &[&str]) = match fields.len() {
             5 => ("0", &fields[..]),
@@ -433,6 +453,47 @@ mod tests {
                 crate::datetime::to_unix(2026, 6, 1, 12, 1, 0),
             ]
         );
+    }
+
+    #[test]
+    fn nickname_yearly_matches_jan_first_midnight() {
+        let schedule = CronSchedule::parse("@yearly").unwrap();
+        assert!(schedule.matches(&civil(1, 1, 4, 0, 0)));
+        assert!(!schedule.matches(&civil(2, 1, 5, 0, 0)));
+    }
+
+    #[test]
+    fn nickname_monthly_matches_first_of_month() {
+        let schedule = CronSchedule::parse("@monthly").unwrap();
+        assert!(schedule.matches(&civil(1, 6, 1, 0, 0)));
+        assert!(!schedule.matches(&civil(2, 6, 2, 0, 0)));
+    }
+
+    #[test]
+    fn nickname_weekly_matches_sunday_midnight() {
+        let schedule = CronSchedule::parse("@weekly").unwrap();
+        assert!(schedule.matches(&civil(7, 6, 0, 0, 0)));
+        assert!(!schedule.matches(&civil(8, 6, 1, 0, 0)));
+    }
+
+    #[test]
+    fn nickname_daily_matches_every_midnight() {
+        let schedule = CronSchedule::parse("@daily").unwrap();
+        assert!(schedule.matches(&civil(3, 6, 3, 0, 0)));
+        assert!(!schedule.matches(&civil(3, 6, 3, 1, 0)));
+    }
+
+    #[test]
+    fn nickname_hourly_matches_every_hour_at_minute_zero() {
+        let schedule = CronSchedule::parse("@hourly").unwrap();
+        assert!(schedule.matches(&civil(3, 6, 3, 14, 0)));
+        assert!(!schedule.matches(&civil(3, 6, 3, 14, 1)));
+    }
+
+    #[test]
+    fn nickname_is_case_sensitive_and_unknown_ones_are_rejected() {
+        assert!(CronSchedule::parse("@YEARLY").is_err());
+        assert!(CronSchedule::parse("@fortnightly").is_err());
     }
 
     #[test]
