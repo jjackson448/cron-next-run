@@ -178,6 +178,18 @@ impl CronSchedule {
         Ok(CronSchedule { second, minute, hour, dom, month, dow })
     }
 
+    // Day-of-month / day-of-week combination, per the usual cron quirk: when
+    // both are restricted, a match happens on either one, not both at once.
+    fn day_matches(&self, c: &Civil) -> bool {
+        let dom_ok = self.dom.contains(c.day);
+        let dow_ok = self.dow.contains(c.weekday);
+        if self.dom.is_all || self.dow.is_all {
+            dom_ok && dow_ok
+        } else {
+            dom_ok || dow_ok
+        }
+    }
+
     // Everything except the seconds field. Used by next_n, which checks
     // seconds separately since a single matching minute can contain more
     // than one matching second.
@@ -191,50 +203,120 @@ impl CronSchedule {
         if !self.month.contains(c.month) {
             return false;
         }
-        let dom_ok = self.dom.contains(c.day);
-        let dow_ok = self.dow.contains(c.weekday);
-        // when both day-of-month and day-of-week are restricted, cron fires
-        // on either one matching, not both at once
-        if self.dom.is_all || self.dow.is_all {
-            dom_ok && dow_ok
-        } else {
-            dom_ok || dow_ok
-        }
+        self.day_matches(c)
     }
 
     fn matches(&self, c: &Civil) -> bool {
         self.second.contains(c.second) && self.minute_matches(c)
     }
 
-    /// Returns up to `count` unix timestamps, strictly after `from_unix`, that
-    /// match this schedule. Scans minute by minute, capped five years out so
-    /// an unsatisfiable expression fails fast instead of looping forever;
-    /// within each matching minute, every matching second is emitted in
-    /// order before moving on.
+    // Smallest allowed value in `field` that is >= `start`, up to `max`.
+    // None means nothing qualifies in that range, so the caller has to
+    // carry into the next unit up (day, hour, ...).
+    fn next_allowed(field: &Field, start: u32, max: u32) -> Option<u32> {
+        if start > max {
+            return None;
+        }
+        (start..=max).find(|&v| field.contains(v))
+    }
+
+    // Where the next allowed month starts, wrapping into next year if none
+    // of the remaining months this year qualify.
+    fn next_month_start(&self, year: i64, month: u32) -> i64 {
+        match Self::next_allowed(&self.month, month + 1, 12) {
+            Some(m) => crate::datetime::to_unix(year, m, 1, 0, 0, 0),
+            None => {
+                // field parsing always leaves at least one bit set
+                let m = Self::next_allowed(&self.month, 1, 12).expect("month field is never empty");
+                crate::datetime::to_unix(year + 1, m, 1, 0, 0, 0)
+            }
+        }
+    }
+
+    /// Returns the earliest match strictly after `from_unix`, or `None` if
+    /// nothing matches within the next five years (an unsatisfiable
+    /// expression, like day-of-month 30 restricted to February, fails fast
+    /// instead of looping forever).
+    ///
+    /// Rather than testing every second in that window, this jumps straight
+    /// to the next candidate at whichever field currently fails: a bad month
+    /// jumps to the first day of the next matching month, a bad day jumps to
+    /// midnight the next day, and so on down to seconds. Each jump re-checks
+    /// every field from scratch, since moving a coarser field can invalidate
+    /// ones that already matched.
+    pub fn next_after(&self, from_unix: i64) -> Option<i64> {
+        let mut t = from_unix + 1;
+        let limit = t + 60 * 60 * 24 * 366 * 5;
+        while t < limit {
+            let c = crate::datetime::from_unix(t);
+
+            if !self.month.contains(c.month) {
+                t = self.next_month_start(c.year, c.month);
+                continue;
+            }
+
+            if !self.day_matches(&c) {
+                t = start_of_day(t) + 86400;
+                continue;
+            }
+
+            if !self.hour.contains(c.hour) {
+                t = match Self::next_allowed(&self.hour, c.hour + 1, 23) {
+                    Some(h) => start_of_day(t) + h as i64 * 3600,
+                    None => start_of_day(t) + 86400,
+                };
+                continue;
+            }
+
+            if !self.minute.contains(c.minute) {
+                t = match Self::next_allowed(&self.minute, c.minute + 1, 59) {
+                    Some(m) => start_of_hour(t) + m as i64 * 60,
+                    None => start_of_hour(t) + 3600,
+                };
+                continue;
+            }
+
+            if !self.second.contains(c.second) {
+                t = match Self::next_allowed(&self.second, c.second + 1, 59) {
+                    Some(s) => start_of_minute(t) + s as i64,
+                    None => start_of_minute(t) + 60,
+                };
+                continue;
+            }
+
+            return Some(t);
+        }
+        None
+    }
+
+    /// Returns up to `count` unix timestamps, strictly after `from_unix`,
+    /// that match this schedule, in order.
     pub fn next_n(&self, from_unix: i64, count: usize) -> Vec<i64> {
         let mut results = Vec::with_capacity(count);
-        let mut minute_start = from_unix - from_unix.rem_euclid(60);
-        let limit = minute_start + 60 * 60 * 24 * 366 * 5;
-        while results.len() < count && minute_start < limit {
-            let civil = crate::datetime::from_unix(minute_start);
-            if self.minute_matches(&civil) {
-                for second in 0..60u32 {
-                    if results.len() >= count {
-                        break;
-                    }
-                    if !self.second.contains(second) {
-                        continue;
-                    }
-                    let t = minute_start + second as i64;
-                    if t > from_unix {
-                        results.push(t);
-                    }
+        let mut cursor = from_unix;
+        while results.len() < count {
+            match self.next_after(cursor) {
+                Some(t) => {
+                    results.push(t);
+                    cursor = t;
                 }
+                None => break,
             }
-            minute_start += 60;
         }
         results
     }
+}
+
+fn start_of_day(t: i64) -> i64 {
+    t - t.rem_euclid(86400)
+}
+
+fn start_of_hour(t: i64) -> i64 {
+    t - t.rem_euclid(3600)
+}
+
+fn start_of_minute(t: i64) -> i64 {
+    t - t.rem_euclid(60)
 }
 
 #[cfg(test)]
@@ -502,5 +584,45 @@ mod tests {
         let from = crate::datetime::to_unix(2026, 6, 1, 9, 0, 0);
         let results = schedule.next_n(from, 1);
         assert_eq!(results, vec![crate::datetime::to_unix(2026, 6, 1, 9, 0, 15)]);
+    }
+
+    #[test]
+    fn next_after_jumps_from_friday_evening_to_monday_morning() {
+        // 2026-06-05 is a Friday; next weekday match should land on Monday.
+        let schedule = CronSchedule::parse("0 9 * * 1-5").unwrap();
+        let from = crate::datetime::to_unix(2026, 6, 5, 17, 45, 0);
+        let next = schedule.next_after(from).unwrap();
+        assert_eq!(next, crate::datetime::to_unix(2026, 6, 8, 9, 0, 0));
+    }
+
+    #[test]
+    fn next_after_jumps_across_a_month_boundary() {
+        let schedule = CronSchedule::parse("0 0 1 * *").unwrap();
+        let from = crate::datetime::to_unix(2026, 6, 15, 12, 0, 0);
+        let next = schedule.next_after(from).unwrap();
+        assert_eq!(next, crate::datetime::to_unix(2026, 7, 1, 0, 0, 0));
+    }
+
+    #[test]
+    fn next_after_jumps_across_a_year_boundary() {
+        let schedule = CronSchedule::parse("@yearly").unwrap();
+        let from = crate::datetime::to_unix(2026, 3, 1, 0, 0, 0);
+        let next = schedule.next_after(from).unwrap();
+        assert_eq!(next, crate::datetime::to_unix(2027, 1, 1, 0, 0, 0));
+    }
+
+    #[test]
+    fn next_after_gives_up_on_an_impossible_date_within_the_search_window() {
+        // February never has a 30th, so this can never fire.
+        let schedule = CronSchedule::parse("0 0 30 2 *").unwrap();
+        let from = crate::datetime::to_unix(2026, 1, 1, 0, 0, 0);
+        assert!(schedule.next_after(from).is_none());
+    }
+
+    #[test]
+    fn next_n_still_returns_partial_results_for_unsatisfiable_expressions() {
+        let schedule = CronSchedule::parse("0 0 30 2 *").unwrap();
+        let from = crate::datetime::to_unix(2026, 1, 1, 0, 0, 0);
+        assert_eq!(schedule.next_n(from, 3), Vec::<i64>::new());
     }
 }

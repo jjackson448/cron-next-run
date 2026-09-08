@@ -80,9 +80,8 @@ Everything runs in UTC. There's no timezone handling yet.
 ## What this doesn't do (yet)
 
 - No timezone support
-- Finds matches by scanning minute by minute, capped at five years out, so
-  an expression that can never match (February 30th) fails fast instead of
-  hanging, but it's not the fastest way to answer the question
+- Search for the next match is capped at five years out, so an expression
+  that can never match (February 30th) fails fast instead of hanging
 
 ## Building
 
