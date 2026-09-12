@@ -53,6 +53,19 @@ schedule without waiting for the clock to cooperate):
 cron-next-run "0 9 * * 1" --from 2026-08-22T00:00:00
 ```
 
+Evaluate the schedule against a fixed UTC offset instead of UTC itself:
+
+```
+cron-next-run "0 9 * * 1-5" --offset +05:30
+```
+
+The cron fields are matched against wall-clock time at that offset. `--from`
+values are read as wall-clock time at the offset too, not UTC. Human output
+gets the offset appended; JSON output adds a `local` field alongside `unix`
+and `utc`. `--offset` accepts `+HH:MM`, `-HHMM`, or `Z`/`UTC` for no offset.
+This is a fixed shift, not a real timezone: no daylight saving, no rule
+changes over time, since the standard library doesn't ship a tz database.
+
 ## Cron format
 
 Standard five-field cron: `minute hour day-of-month month day-of-week`.
@@ -75,11 +88,13 @@ not both.
 In place of the five fields, the usual nicknames also work: `@yearly`,
 `@monthly`, `@weekly`, `@daily`, `@hourly`.
 
-Everything runs in UTC. There's no timezone handling yet.
+Runs in UTC by default; pass `--offset` for a fixed UTC offset instead. See
+above for what that does and doesn't cover.
 
 ## What this doesn't do (yet)
 
-- No timezone support
+- No real timezone support (named zones, daylight saving, historical
+  offset changes) — only a fixed UTC offset via `--offset`
 - Search for the next match is capped at five years out, so an expression
   that can never match (February 30th) fails fast instead of hanging
 

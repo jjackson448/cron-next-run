@@ -87,6 +87,66 @@ pub fn format_iso(c: &Civil) -> String {
     )
 }
 
+/// Same as `format_iso`, but with a `+HH:MM`/`-HH:MM` offset suffix instead
+/// of `Z`.
+pub fn format_iso_offset(c: &Civil, offset_seconds: i64) -> String {
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{}",
+        c.year,
+        c.month,
+        c.day,
+        c.hour,
+        c.minute,
+        c.second,
+        format_offset(offset_seconds)
+    )
+}
+
+pub fn format_offset(offset_seconds: i64) -> String {
+    let sign = if offset_seconds < 0 { '-' } else { '+' };
+    let total_minutes = offset_seconds.abs() / 60;
+    format!("{}{:02}:{:02}", sign, total_minutes / 60, total_minutes % 60)
+}
+
+/// Parses a fixed UTC offset such as `+05:30`, `-0800`, or `Z`/`UTC` (no
+/// offset). This is deliberately not a timezone: no daylight saving, no
+/// historical rule changes, just a constant shift applied to the wall clock
+/// before cron fields are evaluated.
+pub fn parse_offset(s: &str) -> Result<i64, String> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("z") || s.eq_ignore_ascii_case("utc") {
+        return Ok(0);
+    }
+
+    let (sign, rest) = match s.as_bytes().first() {
+        Some(b'+') => (1i64, &s[1..]),
+        Some(b'-') => (-1i64, &s[1..]),
+        _ => return Err(format!("invalid offset '{}', expected a leading + or -, e.g. +05:30", s)),
+    };
+
+    let (hh, mm) = if let Some((h, m)) = rest.split_once(':') {
+        (h, m)
+    } else if rest.len() == 4 {
+        rest.split_at(2)
+    } else if rest.len() == 2 {
+        (rest, "00")
+    } else {
+        return Err(format!("invalid offset '{}', expected +HH:MM or +HHMM", s));
+    };
+
+    let hours: i64 = hh
+        .parse()
+        .map_err(|_| format!("invalid offset hours in '{}'", s))?;
+    let minutes: i64 = mm
+        .parse()
+        .map_err(|_| format!("invalid offset minutes in '{}'", s))?;
+    if hours > 18 || minutes > 59 {
+        return Err(format!("offset '{}' out of range", s));
+    }
+
+    Ok(sign * (hours * 3600 + minutes * 60))
+}
+
 pub fn parse_iso(s: &str) -> Result<i64, String> {
     let s = s.trim();
     let s = s.strip_suffix('Z').unwrap_or(s);
@@ -140,4 +200,56 @@ pub fn parse_iso(s: &str) -> Result<i64, String> {
     }
 
     Ok(to_unix(year, month, day, hour, minute, second))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_offset_accepts_colon_form() {
+        assert_eq!(parse_offset("+05:30").unwrap(), 5 * 3600 + 30 * 60);
+        assert_eq!(parse_offset("-08:00").unwrap(), -8 * 3600);
+    }
+
+    #[test]
+    fn parse_offset_accepts_compact_form() {
+        assert_eq!(parse_offset("+0530").unwrap(), 5 * 3600 + 30 * 60);
+        assert_eq!(parse_offset("-0800").unwrap(), -8 * 3600);
+    }
+
+    #[test]
+    fn parse_offset_accepts_hours_only() {
+        assert_eq!(parse_offset("+09").unwrap(), 9 * 3600);
+    }
+
+    #[test]
+    fn parse_offset_z_and_utc_mean_no_offset() {
+        assert_eq!(parse_offset("Z").unwrap(), 0);
+        assert_eq!(parse_offset("utc").unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_offset_rejects_missing_sign() {
+        assert!(parse_offset("05:30").is_err());
+    }
+
+    #[test]
+    fn parse_offset_rejects_out_of_range_values() {
+        assert!(parse_offset("+19:00").is_err());
+        assert!(parse_offset("+05:60").is_err());
+    }
+
+    #[test]
+    fn format_offset_round_trips_sign_and_padding() {
+        assert_eq!(format_offset(5 * 3600 + 30 * 60), "+05:30");
+        assert_eq!(format_offset(-8 * 3600), "-08:00");
+        assert_eq!(format_offset(0), "+00:00");
+    }
+
+    #[test]
+    fn format_iso_offset_uses_offset_suffix_not_z() {
+        let c = Civil { year: 2026, month: 8, day: 24, hour: 9, minute: 0, second: 0, weekday: 1 };
+        assert_eq!(format_iso_offset(&c, 5 * 3600 + 30 * 60), "2026-08-24T09:00:00+05:30");
+    }
 }
