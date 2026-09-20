@@ -48,6 +48,22 @@ const MONTH_NAMES: [(&str, u32); 12] = [
 const DOW_NAMES: [(&str, u32); 7] =
     [("sun", 0), ("mon", 1), ("tue", 2), ("wed", 3), ("thu", 4), ("fri", 5), ("sat", 6)];
 
+// Full names for --explain output, indexed by month - 1.
+const MONTH_FULL_NAMES: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
 fn parse_value(s: &str, names: Option<&[(&str, u32)]>, label: &str) -> Result<u32, CronError> {
     if let Some(table) = names {
         let lower = s.to_ascii_lowercase();
@@ -304,6 +320,146 @@ impl CronSchedule {
             }
         }
         results
+    }
+
+    /// Renders each field as a plain-English line, e.g. "minute: every 15
+    /// minutes" or "day of week: Monday through Friday". Meant for a human
+    /// sanity-checking an expression, not for parsing back.
+    pub fn explain(&self) -> String {
+        let sec_vals: Vec<u32> = (0..=59).filter(|&v| self.second.contains(v)).collect();
+        let min_vals: Vec<u32> = (0..=59).filter(|&v| self.minute.contains(v)).collect();
+        let hour_vals: Vec<u32> = (0..=23).filter(|&v| self.hour.contains(v)).collect();
+        let dom_vals: Vec<u32> = (1..=31).filter(|&v| self.dom.contains(v)).collect();
+        let month_vals: Vec<u32> = (1..=12).filter(|&v| self.month.contains(v)).collect();
+        let dow_vals: Vec<u32> = (0..=6).filter(|&v| self.dow.contains(v)).collect();
+
+        let mut lines = vec![
+            format!(
+                "second: {}",
+                describe(self.second.is_all, &sec_vals, 0, 59, &|v| v.to_string(), "second", "seconds", false)
+            ),
+            format!(
+                "minute: {}",
+                describe(self.minute.is_all, &min_vals, 0, 59, &|v| v.to_string(), "minute", "minutes", false)
+            ),
+            format!(
+                "hour: {}",
+                describe(self.hour.is_all, &hour_vals, 0, 23, &|v| v.to_string(), "hour", "hours", false)
+            ),
+            format!(
+                "day of month: {}",
+                describe(self.dom.is_all, &dom_vals, 1, 31, &|v| v.to_string(), "day", "days", false)
+            ),
+            format!(
+                "month: {}",
+                describe(
+                    self.month.is_all,
+                    &month_vals,
+                    1,
+                    12,
+                    &|v| MONTH_FULL_NAMES[(v - 1) as usize].to_string(),
+                    "month",
+                    "months",
+                    true
+                )
+            ),
+            format!(
+                "day of week: {}",
+                describe(
+                    self.dow.is_all,
+                    &dow_vals,
+                    0,
+                    6,
+                    &|v| crate::datetime::WEEKDAY_NAMES[v as usize].to_string(),
+                    "day",
+                    "days",
+                    true
+                )
+            ),
+        ];
+
+        if !self.dom.is_all && !self.dow.is_all {
+            lines.push(
+                "note: day of month and day of week are both restricted, so this matches when either one is true"
+                    .to_string(),
+            );
+        }
+
+        lines.join("\n")
+    }
+}
+
+// Describes the values a field matches within [min, max] as a short phrase.
+// `bare_lists` drops the unit noun from list/range phrasing (used for month
+// and day-of-week, where the names already carry the meaning) but a
+// step still gets a noun ("every 3 months"), since a bare number doesn't.
+fn describe(
+    is_all: bool,
+    values: &[u32],
+    min: u32,
+    max: u32,
+    name_of: &dyn Fn(u32) -> String,
+    singular: &str,
+    plural: &str,
+    bare_lists: bool,
+) -> String {
+    if is_all {
+        return format!("every {}", singular);
+    }
+    if values.len() == 1 {
+        return if bare_lists { name_of(values[0]) } else { format!("{} {}", singular, name_of(values[0])) };
+    }
+
+    let step = values[1] - values[0];
+    // Any 2-element set is trivially "uniform", which would misdescribe an
+    // arbitrary pair like month "1,7" as "every 6 months" instead of "January
+    // and July". Require a third point before trusting it as a real step.
+    let uniform = values.len() >= 3 && values.windows(2).all(|w| w[1] - w[0] == step);
+    let first = values[0];
+    let last = *values.last().unwrap();
+
+    if uniform {
+        let natural_start = first == min;
+        let natural_end = last + step > max;
+        if step == 1 {
+            let range = format!("{} through {}", name_of(first), name_of(last));
+            return if bare_lists { range } else { format!("{} {}", plural, range) };
+        }
+        if natural_start && natural_end {
+            return format!("every {} {}", step, plural);
+        }
+        return format!("every {} {} from {} through {}", step, plural, name_of(first), name_of(last));
+    }
+
+    // Not a single run or uniform step: group into maximal consecutive runs
+    // so e.g. "1,3,10,11,12" reads as "1, 3 and 10 through 12".
+    let mut parts: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < values.len() {
+        let mut j = i;
+        while j + 1 < values.len() && values[j + 1] == values[j] + 1 {
+            j += 1;
+        }
+        parts.push(if j > i {
+            format!("{} through {}", name_of(values[i]), name_of(values[j]))
+        } else {
+            name_of(values[i])
+        });
+        i = j + 1;
+    }
+    let joined = join_and(&parts);
+    if bare_lists { joined } else { format!("{} {}", plural, joined) }
+}
+
+fn join_and(parts: &[String]) -> String {
+    match parts.len() {
+        0 => String::new(),
+        1 => parts[0].clone(),
+        2 => format!("{} and {}", parts[0], parts[1]),
+        _ => {
+            let (last, rest) = parts.split_last().expect("checked non-empty above");
+            format!("{}, and {}", rest.join(", "), last)
+        }
     }
 }
 
@@ -624,5 +780,61 @@ mod tests {
         let schedule = CronSchedule::parse("0 0 30 2 *").unwrap();
         let from = crate::datetime::to_unix(2026, 1, 1, 0, 0, 0);
         assert_eq!(schedule.next_n(from, 3), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn explain_describes_every_field_as_star() {
+        let schedule = CronSchedule::parse("* * * * *").unwrap();
+        let explanation = schedule.explain();
+        assert!(explanation.contains("second: second 0"));
+        assert!(explanation.contains("minute: every minute"));
+        assert!(explanation.contains("hour: every hour"));
+        assert!(explanation.contains("day of month: every day"));
+        assert!(explanation.contains("month: every month"));
+        assert!(explanation.contains("day of week: every day"));
+    }
+
+    #[test]
+    fn explain_describes_a_step_covering_the_whole_range_without_bounds() {
+        let schedule = CronSchedule::parse("*/15 * * * *").unwrap();
+        assert!(schedule.explain().contains("minute: every 15 minutes"));
+    }
+
+    #[test]
+    fn explain_describes_a_partial_step_with_its_bounds() {
+        let schedule = CronSchedule::parse("1-10/2 * * * *").unwrap();
+        assert!(schedule.explain().contains("minute: every 2 minutes from 1 through 9"));
+    }
+
+    #[test]
+    fn explain_describes_a_contiguous_range() {
+        let schedule = CronSchedule::parse("0 9-17 * * *").unwrap();
+        assert!(schedule.explain().contains("hour: hours 9 through 17"));
+    }
+
+    #[test]
+    fn explain_describes_a_mixed_list_with_and() {
+        let schedule = CronSchedule::parse("1,3,10-12 * * * *").unwrap();
+        assert!(schedule.explain().contains("minute: minutes 1, 3, and 10 through 12"));
+    }
+
+    #[test]
+    fn explain_uses_full_names_for_month_and_weekday() {
+        let schedule = CronSchedule::parse("0 9 * JAN,JUL MON-FRI").unwrap();
+        let explanation = schedule.explain();
+        assert!(explanation.contains("month: January and July"));
+        assert!(explanation.contains("day of week: Monday through Friday"));
+    }
+
+    #[test]
+    fn explain_flags_the_dom_dow_or_quirk() {
+        let schedule = CronSchedule::parse("0 0 15 * 1").unwrap();
+        assert!(schedule.explain().contains("note: day of month and day of week are both restricted"));
+    }
+
+    #[test]
+    fn explain_omits_the_note_when_only_one_of_dom_dow_is_restricted() {
+        let schedule = CronSchedule::parse("0 0 15 * *").unwrap();
+        assert!(!schedule.explain().contains("note:"));
     }
 }

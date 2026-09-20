@@ -66,6 +66,26 @@ and `utc`. `--offset` accepts `+HH:MM`, `-HHMM`, or `Z`/`UTC` for no offset.
 This is a fixed shift, not a real timezone: no daylight saving, no rule
 changes over time, since the standard library doesn't ship a tz database.
 
+Not sure what an expression actually means? Ask it to explain itself instead
+of computing matches:
+
+```
+cron-next-run "*/15 9-17 * * 1-5" --explain
+```
+
+```
+second: second 0
+minute: every 15 minutes
+hour: hours 9 through 17
+day of month: every day
+month: every month
+day of week: Monday through Friday
+```
+
+If day-of-month and day-of-week are both restricted, a note is appended
+explaining that a match happens when either one is true, not both. `--explain`
+ignores `--count`, `--from`, and `--json`.
+
 ## Cron format
 
 Standard five-field cron: `minute hour day-of-month month day-of-week`.

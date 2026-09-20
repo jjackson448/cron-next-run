@@ -20,10 +20,11 @@ struct Options {
     json: bool,
     from: Option<i64>,
     offset: i64,
+    explain: bool,
 }
 
 fn usage() -> String {
-    "usage: cron-next-run <expression> [--count N] [--json] [--from <YYYY-MM-DDTHH:MM:SS>] [--offset <+HH:MM>]"
+    "usage: cron-next-run <expression> [--count N] [--json] [--from <YYYY-MM-DDTHH:MM:SS>] [--offset <+HH:MM>] [--explain]"
         .to_string()
 }
 
@@ -33,12 +34,17 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut json = false;
     let mut from: Option<i64> = None;
     let mut offset: i64 = 0;
+    let mut explain = false;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--json" => {
                 json = true;
+                i += 1;
+            }
+            "--explain" => {
+                explain = true;
                 i += 1;
             }
             "--count" => {
@@ -74,7 +80,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         return Err("--count must be at least 1".to_string());
     }
 
-    Ok(Options { expr, count, json, from, offset })
+    Ok(Options { expr, count, json, from, offset, explain })
 }
 
 fn run(args: &[String]) -> Result<(), String> {
@@ -85,6 +91,15 @@ fn run(args: &[String]) -> Result<(), String> {
 
     let opts = parse_args(args)?;
     let schedule = cron::CronSchedule::parse(&opts.expr).map_err(|e| e.to_string())?;
+
+    if opts.explain {
+        println!("{}", schedule.explain());
+        if opts.offset != 0 {
+            println!("offset: {}", datetime::format_offset(opts.offset));
+        }
+        return Ok(());
+    }
+
     // Cron fields are evaluated against the local wall clock, so the search
     // runs on timestamps shifted by the offset, then shifted back to real
     // UTC unix time whenever that's what needs reporting.
